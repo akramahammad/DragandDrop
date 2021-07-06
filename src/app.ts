@@ -39,10 +39,21 @@ function autobind(_target:any,_methodName:string,descriptor:PropertyDescriptor){
     return isValid
 }
 
+enum ProjectStatus{
+    Active,Finished
+}
+
+class Project{
+    constructor( public id:string, public title:string,public description:string, public people:number, public status:ProjectStatus){
+    }
+}
+
+type Listener=(items:Project[])=>void
+
 class ProjectState{
-    public projects:any[]=[]
+    public projects:Project[]=[]
     static instance:ProjectState
-    public listeners:any[]=[]
+    public listeners:Listener[]=[]
 
     static getInstance(){
         if(this.instance) return this.instance
@@ -50,87 +61,163 @@ class ProjectState{
         return this.instance
     }
     addProjects(title:string,description:string,people:number){
-        const newProject={
-            id:Math.random().toString(),
-            title,
-            description,
-            people,
-        }
+        const newProject=new Project(Math.random().toString(),title,description,people,ProjectStatus.Active)
         this.projects.push(newProject)
-        for(const listenerFn of this.listeners){
-            listenerFn(this.projects.slice(this.projects.length-1))
+        this.updateListeners()
+    }
+    moveProject(id:string,newStatus:ProjectStatus){
+        const proj=this.projects.find(proj => proj.id===id)
+        if(proj && proj.status!==newStatus){
+            proj.status=newStatus
+            this.updateListeners()
         }
     }
-
-    addListeners(listenerFn:Function){
+    private updateListeners(){
+        for(const listenerFn of this.listeners){
+            listenerFn(this.projects.slice())
+        }
+    }
+    addListeners(listenerFn:Listener){
         this.listeners.push(listenerFn)
     }
 }
 
 const state=ProjectState.getInstance()
 
-class ProjectList{
+abstract class Component<T extends HTMLElement,U extends HTMLElement>{
     templateElement:HTMLTemplateElement
-    hostElement:HTMLElement
-    element:HTMLElement
-    assignedProjects:any[]=[]
+    hostElement:T
+    element:U
+    constructor(templateId:string,hostElementId:string,insertAtStart:boolean,newElementId?:string){
+        this.templateElement=document.getElementById(templateId)! as HTMLTemplateElement
+        this.hostElement=document.getElementById(hostElementId)! as T
+        const importedNode=document.importNode(this.templateElement.content,true)
+        this.element=importedNode.firstElementChild as U
+        if(newElementId){
+            this.element.id=newElementId
+        }
+        this.attach(insertAtStart)
+    }
+
+    private attach(start:boolean){
+        this.hostElement.insertAdjacentElement(start?"afterbegin":'beforeend',this.element)
+    }
+    abstract configure():void
+    abstract renderContent():void
+}
+
+interface Draggable{
+    dragStartHandler(event:DragEvent):void
+    dragEndHandler(event:DragEvent):void
+}
+interface DropTarget{
+    dragOverHandler(event:DragEvent):void
+    dropHandler(event:DragEvent):void
+    dragLeaveHandler(event:DragEvent):void
+}
+
+class ProjectItem extends Component<HTMLUListElement,HTMLLIElement> implements Draggable{
+    private project:Project
+    get persons(){
+        if(this.project.people===1){
+            return '1 person'
+        }
+        return `${this.project.people} people`
+    }
+    constructor(hostId:string,project:Project){
+        super('single-project',hostId,false,project.id)
+        this.project=project
+        this.configure()
+        this.renderContent()
+    }
+    configure(){
+        this.element.addEventListener('dragstart',this.dragStartHandler)
+        this.element.addEventListener('dragend',this.dragEndHandler)
+    }
+    renderContent(){
+        this.element.querySelector('h2')!.textContent = this.project.title;
+        this.element.querySelector('h3')!.textContent = this.persons + " assigned";
+        this.element.querySelector('p')!.textContent = this.project.description;
+    }
+    @autobind
+    dragEndHandler(){
+    }
+    @autobind
+    dragStartHandler(event:DragEvent){
+        event.dataTransfer!.setData('text/plain',this.project.id)
+        event.dataTransfer!.effectAllowed='move'
+    }
+}
+
+class ProjectList extends Component<HTMLDivElement,HTMLElement> implements DropTarget{
+    assignedProjects:Project[]
 
     constructor(private type:'active'|'finished'){
-        this.templateElement=document.getElementById("project-list")! as HTMLTemplateElement
-        this.hostElement=document.getElementById("app")! as HTMLElement
-        const importedNode=document.importNode(this.templateElement.content,true)
-        this.element=importedNode.firstElementChild as HTMLElement
-        this.element.id=`${type}-projects`    
-        this.attach()   
+        super('project-list','app',false,`${type}-projects`)   
+        this.assignedProjects=[]
         this.renderContent()
-        state.addListeners((projects:any[])=>{
-            console.log({projects})
-            this.assignedProjects.push(projects[0])
-            this.renderProjects()
-        })
+        this.configure()
+        state.addListeners((projects:Project[])=>{
+            const relevantProjects = projects.filter(prj => {
+                if (this.type === 'active') {
+                  return prj.status === ProjectStatus.Active;
+                }
+                return prj.status === ProjectStatus.Finished;
+              });
+              this.assignedProjects = relevantProjects;
+              this.renderProjects();
+            })
     }
     private renderProjects(){
         const listId=document.getElementById(`${this.type}-project-list`)! as HTMLUListElement
         listId.innerHTML=""
         for(const prjItem of this.assignedProjects){
-            const listItem=document.createElement("li")
-            listItem.textContent=prjItem.title
-            listId.appendChild(listItem)
+            new ProjectItem(this.element.querySelector('ul')!.id, prjItem)
         }
     }
-
-    private attach(){
-        this.hostElement.insertAdjacentElement("beforeend",this.element)
-    }
-    private renderContent(){
+    renderContent(){
         const listId=`${this.type}-project-list`
         this.element.querySelector("ul")!.id=listId
         this.element.querySelector("h2")!.innerText=`${this.type.toUpperCase()} PROJECTS`
     }
+    @autobind
+    dragOverHandler(event:DragEvent){
+        event.preventDefault()
+        if(event.dataTransfer && event.dataTransfer.types[0]==='text/plain'){
+            const list=this.element.querySelector('ul')!
+            list.classList.add('droppable')
+        }
+    }
+    @autobind
+    dragLeaveHandler(){
+        const list=this.element.querySelector('ul')!
+        list.classList.remove('droppable')
+    }
+    @autobind
+    dropHandler(event:DragEvent){
+        const projId=event.dataTransfer!.getData('text/plain')
+        state.moveProject(projId,this.type==='active'?ProjectStatus.Active:ProjectStatus.Finished)
+    }
+
+    configure(){
+        this.element.addEventListener('dragover',this.dragOverHandler)
+        this.element.addEventListener('dragleave',this.dragLeaveHandler)
+        this.element.addEventListener('drop',this.dropHandler)
+    }
 }
 
-class ProjectInput{
-    templateElement:HTMLTemplateElement
-    hostElement:HTMLElement
-    element:HTMLFormElement
+class ProjectInput extends Component<HTMLDivElement,HTMLFormElement>{
     titleInputElement:HTMLInputElement
     descriptionInputElement:HTMLInputElement
     peopleInputElement:HTMLInputElement
     
 
     constructor(){
-        this.templateElement=document.getElementById("project-input")! as HTMLTemplateElement
-        this.hostElement=document.getElementById("app")! as HTMLElement
-
-        const importedNode=document.importNode(this.templateElement.content,true)
-        this.element=importedNode.firstElementChild as HTMLFormElement
-        this.element.id="user-input"
-        this.attach()
+        super('project-input','app',true,'user-input')
         this.titleInputElement=document.querySelector("#title")! as HTMLInputElement
         this.descriptionInputElement=document.querySelector("#description")! as HTMLInputElement
         this.peopleInputElement=document.querySelector("#people")! as HTMLInputElement
         this.configure()
-        
     }
 
     private getUserInput():[string,string,number]|void{
@@ -151,7 +238,7 @@ class ProjectInput{
         const PeopleValidatable:Validatable={
             value:+enteredPeople,
             required:true,
-            min:2,
+            min:1,
             max:6
         }
 
@@ -179,11 +266,9 @@ class ProjectInput{
         this.descriptionInputElement.value=""
         this.peopleInputElement.value=""
     }
-    private configure(){
+    renderContent(){}
+    configure(){
         this.element.addEventListener("submit",this.submitHandler)
-    }
-    private attach(){
-        this.hostElement.insertAdjacentElement('afterbegin',this.element)
     }
 }
 
